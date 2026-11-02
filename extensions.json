@@ -1,0 +1,9 @@
+[
+  {
+    "id": "deezerall",
+    "name": "Deezer All Songs",
+    "subtitle": "Deezer extension with complete artist discography",
+    "iconUrl": "https://cdn-files.dzcdn.net/img/common/og-deezer-logo.png",
+    "updateUrl": "https://api.github.com/repos/GuruOfTheMoon/echo-deezer-extension/releases"
+  }
+]

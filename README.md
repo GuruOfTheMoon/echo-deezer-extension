@@ -1,11 +1,14 @@
-[![Latest Version](https://img.shields.io/github/v/release/LuftVerbot/echo-deezer-extension?color=blue)](https://github.com/LuftVerbot/echo-deezer-extension/releases/latest)
-# Deezer Extension for Echo
+[![Latest Version](https://img.shields.io/github/v/release/GuruOfTheMoon/echo-deezer-extension?color=blue)](https://github.com/GuruOfTheMoon/echo-deezer-extension/releases/latest)
+# Deezer All Songs Extension for Echo
 
-This is an extension for the Extension based Music Player [Echo](https://github.com/brahmkshatriya/echo). It aims to implement a seamless Deezer experience without needing a premium account.
+This is a fork of [LuftVerbot/echo-deezer-extension](https://github.com/LuftVerbot/echo-deezer-extension) for the [Echo](https://github.com/brahmkshatriya/echo) music player. It adds complete artist discography support while keeping Deezer playback, library and login features.
+
+> The extension id is `deezerall`, so it can be installed alongside the official Deezer extension instead of conflicting with it.
 
 ## Features
 
 - **High-Quality Audio Support**: FLAC, 320kbps, or 128kbps without a premium account(May sometimes be unstable, due to accounts on the server).
+- **Complete Discography**: Every artist profile gets an **All Songs** playlist that lazily aggregates albums, EPs and singles, deduplicated across standard and deluxe editions.
 - **Multiple Login Options**: Choose from three different ways to sign in.
 - **Personal Library Access**: Access your Deezer library directly within Echo.
 - **Diverse Radio Options**: Explore various radio features, including Flow and more.
@@ -38,18 +41,33 @@ This is an extension for the Extension based Music Player [Echo](https://github.
 
 Ensure you have Echo installed on your device before proceeding. Currently it's only possible to get it from [Discord](https://discord.gg/J3WvbBUU8Z).
 
-1. **Download the Extension**:
-   - Visit the [latest release page](https://github.com/LuftVerbot/echo-deezer-extension/releases/latest).
-   - Download the latest `.eapk` file of the Deezer Extension.
+### Import via link (recommended)
 
-2. **Install the Extension**:
-   - Open the downloaded `.eapk` file.
-   - When prompted, select **Echo** as the application to install the extension.
-   - Follow the on-screen instructions to complete the installation.
+1. Open Echo and go to **Extensions → Add**.
+2. Paste this link:
 
-3. **Launch Echo**:
-   - Open the Echo app.
-   - The Deezer Extension is now installed and ready to use.
+   ```
+   https://raw.githubusercontent.com/GuruOfTheMoon/echo-deezer-extension/main/extensions.json
+   ```
+
+3. Select **Deezer All Songs** and download it.
+4. When the installer asks, choose **File** installation to load it as an Echo extension. Choose **App** only if you also want the Deezer link handler installed as a separate app.
+5. Launch Echo and select the extension.
+
+The extension will check this repository's GitHub releases for updates automatically.
+
+### Manual install
+
+1. Download the latest `.eapk` from the [releases page](https://github.com/GuruOfTheMoon/echo-deezer-extension/releases/latest).
+2. Open it with Echo and follow the on-screen installer.
+
+### Building locally
+
+```bash
+./gradlew assembleRelease
+```
+
+A signed release requires the `KEYSTORE_B64` and `PASSWORD` repository secrets used by the GitHub Actions release workflow.
 
 ## FAQ
 

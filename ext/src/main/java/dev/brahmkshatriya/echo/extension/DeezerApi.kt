@@ -11,6 +11,7 @@ import dev.brahmkshatriya.echo.extension.Utils.asObject
 import dev.brahmkshatriya.echo.extension.Utils.str
 import dev.brahmkshatriya.echo.extension.api.DeezerAlbum
 import dev.brahmkshatriya.echo.extension.api.DeezerArtist
+import dev.brahmkshatriya.echo.extension.api.DeezerDiscography
 import dev.brahmkshatriya.echo.extension.api.DeezerMedia
 import dev.brahmkshatriya.echo.extension.api.DeezerPlaylist
 import dev.brahmkshatriya.echo.extension.api.DeezerRadio
@@ -19,6 +20,9 @@ import dev.brahmkshatriya.echo.extension.api.DeezerShow
 import dev.brahmkshatriya.echo.extension.api.DeezerTrack
 import dev.brahmkshatriya.echo.extension.api.DeezerUtil
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
@@ -26,6 +30,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromStream
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import okhttp3.Headers
@@ -64,6 +69,10 @@ class DeezerApi(private val session: DeezerSession) {
         private const val API = "https://api.deezer.com/1.0/gateway.php"
         private const val PIPE = "https://pipe.deezer.com/api"
         private const val AUTH = "https://auth.deezer.com/login/anonymous"
+        private const val PUBLIC_API = "https://api.deezer.com"
+
+        private const val PUBLIC_API_MIN_INTERVAL_MS = 110L
+        private const val PUBLIC_API_MAX_ATTEMPTS = 3
 
         private const val LYRICS_QUERY = "query SynchronizedTrackLyrics(\$trackId: String!) { track(trackId: \$trackId) { lyrics { synchronizedLines { lrcTimestamp line } } } }"
     }
@@ -139,6 +148,9 @@ class DeezerApi(private val session: DeezerSession) {
     private val client: OkHttpClient  by lazy { createOkHttpClient(useProxy = true) }
     private val clientLog: OkHttpClient by lazy { createOkHttpClient(useProxy = true , true) }
     private val clientNP: OkHttpClient by lazy { createOkHttpClient(useProxy = false) }
+
+    private val publicApiMutex = Mutex()
+    private var publicApiLastRequestAt = 0L
 
     private val staticHeaders: Headers by lazy {
         Headers.Builder().apply {
@@ -244,6 +256,75 @@ class DeezerApi(private val session: DeezerSession) {
             response.body.source().let {
                 decodeJsonStream(it.inputStream())
             }
+        }
+    }
+
+    /**
+     * Calls the public Deezer API (api.deezer.com).
+     *
+     * Unlike [callApi] this endpoint does not require an ARL/SID, which makes
+     * it suitable for paging through an artist's complete discography. Calls
+     * are throttled globally so that the discography loader can use a small
+     * amount of concurrency without tripping Deezer's rate limit, and 429/5xx
+     * responses are retried a couple of times.
+     */
+    suspend fun callPublicApi(
+        path: String,
+        params: Map<String, String> = emptyMap()
+    ): JsonObject = withContext(Dispatchers.IO) {
+        val url = "$PUBLIC_API/${path.trimStart('/')}".toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.apply { params.forEach { (key, value) -> addQueryParameter(key, value) } }
+            ?.build()
+            ?: throw IllegalArgumentException("Invalid Deezer API path: $path")
+
+        var lastError: Exception? = null
+        for (attempt in 1..PUBLIC_API_MAX_ATTEMPTS) {
+            throttlePublicApi()
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .header("Accept", "application/json")
+                .header("Accept-Language", "$language,*")
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36"
+                )
+                .build()
+
+            val response = client.newCall(request).await()
+            if (response.code == 429 || response.code >= 500) {
+                val retryAfter = response.header("Retry-After")?.toLongOrNull()?.times(1000)
+                response.close()
+                lastError = Exception("Deezer API call failed with status ${response.code}: $path")
+                if (attempt < PUBLIC_API_MAX_ATTEMPTS) {
+                    delay(retryAfter ?: (attempt * 1000L))
+                }
+                continue
+            }
+
+            response.use {
+                val result = decodeJsonStream(response.body.source().inputStream())
+                if (!response.isSuccessful) {
+                    throw Exception("Deezer API call failed with status ${response.code}: $result")
+                }
+                val error = result["error"]
+                if (error is JsonObject) {
+                    val message = runCatching { error["message"]?.jsonPrimitive?.content }
+                        .getOrNull() ?: error.toString()
+                    throw Exception("Deezer API error: $message")
+                }
+                return@withContext result
+            }
+        }
+        throw lastError ?: Exception("Deezer API call failed: $path")
+    }
+
+    private suspend fun throttlePublicApi() {
+        publicApiMutex.withLock {
+            val wait = PUBLIC_API_MIN_INTERVAL_MS - (System.currentTimeMillis() - publicApiLastRequestAt)
+            if (wait > 0) delay(wait)
+            publicApiLastRequestAt = System.currentTimeMillis()
         }
     }
 
@@ -409,6 +490,16 @@ class DeezerApi(private val session: DeezerSession) {
     suspend fun addFavoriteAlbum(id: String) = deezerAlbum.addFavoriteAlbum(id)
 
     suspend fun removeFavoriteAlbum(id: String) = deezerAlbum.removeFavoriteAlbum(id)
+
+    //<============= Discography =============>
+
+    private val deezerDiscography by lazy { DeezerDiscography(this) }
+
+    suspend fun artistAlbums(artistId: String, index: Int, limit: Int): JsonObject =
+        deezerDiscography.artistAlbums(artistId, index, limit)
+
+    suspend fun albumTracks(albumId: String, index: Int, limit: Int): JsonObject =
+        deezerDiscography.albumTracks(albumId, index, limit)
 
     //<============= Shows =============>
 

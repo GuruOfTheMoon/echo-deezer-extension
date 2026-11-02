@@ -12,9 +12,15 @@ import dev.brahmkshatriya.echo.extension.DeezerParser
 import dev.brahmkshatriya.echo.extension.Utils.asObject
 import kotlinx.serialization.json.jsonArray
 
-class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private val api: DeezerApi, private val parser: DeezerParser) {
+class DeezerPlaylistClient(
+    private val deezerExtension: DeezerExtension,
+    private val api: DeezerApi,
+    private val parser: DeezerParser,
+    private val discography: DeezerDiscographyClient
+) {
 
     fun getShelves(playlist: Playlist): Feed<Shelf> = PagedData.Single {
+        if (discography.isVirtual(playlist)) return@Single emptyList()
         /*DeezerExtension().handleArlExpiration()
         val jsonObject = api.playlist(playlist)
         val resultsObject = jsonObject["results"]!!.asObject()
@@ -30,25 +36,29 @@ class DeezerPlaylistClient(private val deezerExtension: DeezerExtension, private
     }.toFeed()
 
     suspend fun loadPlaylist(playlist: Playlist): Playlist {
+        if (discography.isVirtual(playlist)) return discography.loadPlaylist(playlist)
         deezerExtension.handleArlExpiration()
         val jsonObject = api.playlist(playlist)
         val resultsObject = jsonObject["results"]!!.asObject()
         return parser.run { resultsObject.toPlaylist() }
     }
 
-    fun loadTracks(playlist: Playlist): Feed<Track> = PagedData.Single {
-        deezerExtension.handleArlExpiration()
-        val jsonObject = api.playlist(playlist)
-        val dataArray = jsonObject["results"]!!.asObject()["SONGS"]!!.asObject()["data"]!!.jsonArray
-        dataArray.mapIndexed { index, song ->
-            val currentTrack = parser.run { song.asObject().toTrack() }
-            val nextTrack = parser.run { dataArray.getOrNull(index + 1)?.asObject()?.toTrack() }
-            currentTrack.copy(
-                extras = currentTrack.extras + mapOf(
-                    "NEXT" to nextTrack?.id.orEmpty(),
-                    "playlist_id" to playlist.id
+    fun loadTracks(playlist: Playlist): Feed<Track> {
+        if (discography.isVirtual(playlist)) return discography.loadTracks(playlist)
+        return PagedData.Single {
+            deezerExtension.handleArlExpiration()
+            val jsonObject = api.playlist(playlist)
+            val dataArray = jsonObject["results"]!!.asObject()["SONGS"]!!.asObject()["data"]!!.jsonArray
+            dataArray.mapIndexed { index, song ->
+                val currentTrack = parser.run { song.asObject().toTrack() }
+                val nextTrack = parser.run { dataArray.getOrNull(index + 1)?.asObject()?.toTrack() }
+                currentTrack.copy(
+                    extras = currentTrack.extras + mapOf(
+                        "NEXT" to nextTrack?.id.orEmpty(),
+                        "playlist_id" to playlist.id
+                    )
                 )
-            )
-        }
-    }.toFeed()
+            }
+        }.toFeed()
+    }
 }

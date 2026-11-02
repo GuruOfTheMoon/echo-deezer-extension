@@ -1,80 +1,84 @@
-name: nightly
+name: build-and-release
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
+
+concurrency:
+  group: extension-release
+  cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: temurin
           java-version: 17
-          cache: 'gradle'
+          cache: gradle
 
-      - name: Cook Variables from gradle.properties
-        run : |
-          name=$(grep '^extName=' gradle.properties | cut -d'=' -f2)
-          echo "NAME=$name Extension" >> $GITHUB_ENV
-          id=$(grep '^extId=' gradle.properties | cut -d'=' -f2)
-          echo "TAG=$id" >> $GITHUB_ENV
-
-      - name: Make Environment
+      - name: Read extension metadata
         run: |
-          version=$( echo ${{ github.event.head_commit.id }} | cut -c1-7 )
-          echo "VERSION=v$version" >> $GITHUB_ENV
-          echo -e "## ${{ env.NAME }}\n${{ github.event.head_commit.message }}" > commit.txt
-          echo "APP_PATH=app/build/${{ env.TAG }}-$version.eapk" >> $GITHUB_ENV
-          echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > $GITHUB_WORKSPACE/signing-key.jks
+          echo "EXT_ID=$(grep '^extId=' gradle.properties | cut -d= -f2)" >> "$GITHUB_ENV"
+          echo "EXT_NAME=$(grep '^extName=' gradle.properties | cut -d= -f2)" >> "$GITHUB_ENV"
+
+      - name: Decode signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::KEYSTORE_B64 repository secret is missing"
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$GITHUB_WORKSPACE/signing-key.jks"
           chmod +x ./gradlew
 
-      - name: Build with Gradle
+      - name: Build signed release
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.PASSWORD }}
         run: |
-          ./gradlew assembleRelease \
-          -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/signing-key.jks \
-          -Pandroid.injected.signing.store.password=${{ secrets.PASSWORD }} \
-          -Pandroid.injected.signing.key.alias=key0 \
-          -Pandroid.injected.signing.key.password=${{ secrets.PASSWORD }}
-          
-          cp app/build/outputs/apk/release/app-release.apk ${{ env.APP_PATH }}
+          VERSION="v${GITHUB_SHA::7}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "APP_PATH=app/build/${EXT_ID}-${VERSION}.eapk" >> "$GITHUB_ENV"
 
-      - name: Upload APK
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/signing-key.jks" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias=key0 \
+            -Pandroid.injected.signing.key.password="$KEYSTORE_PASSWORD"
+
+          cp app/build/outputs/apk/release/app-release.apk "$APP_PATH"
+
+      - name: Verify signed artifact
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)
+          "$APKSIGNER" verify --verbose "$APP_PATH"
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
+          name: ${{ env.EXT_ID }}-${{ env.VERSION }}
           path: ${{ env.APP_PATH }}
 
-      - name: Create Release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          make_latest: true
           tag_name: ${{ env.VERSION }}
-          body_path: commit.txt
-          name: ${{ env.VERSION }}
+          name: ${{ env.EXT_NAME }} ${{ env.VERSION }}
+          body: |
+            Automated build of ${{ env.EXT_NAME }} (`${{ env.EXT_ID }}`).
+            Commit: ${{ github.sha }}
           files: ${{ env.APP_PATH }}
-
-      - name: Delete Old Releases
-        uses: sgpublic/delete-release-action@master
-        with:
-          release-drop: true
-          release-keep-count: 2
-          release-drop-tag: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload APK to Discord
-        shell: bash
-        env:
-          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          commit=$(jq -Rsa . <<< "${{ github.event.head_commit.message }}"  | tail -c +2 | head -c -2)
-          message=$(echo "@everyone **${{ env.VERSION }}**\n$commit")
-          curl -F "payload_json={\"content\":\"${message}\"}" \
-          -F "file=@${{ env.APP_PATH }}" \
-          ${{ env.WEBHOOK }}
+          make_latest: true

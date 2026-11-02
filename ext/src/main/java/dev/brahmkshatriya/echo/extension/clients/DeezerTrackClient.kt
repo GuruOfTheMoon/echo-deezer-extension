@@ -11,13 +11,16 @@ import dev.brahmkshatriya.echo.extension.DeezerParser
 import dev.brahmkshatriya.echo.extension.Utils
 import dev.brahmkshatriya.echo.extension.Utils.asObject
 import dev.brahmkshatriya.echo.extension.Utils.str
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import okhttp3.OkHttpClient
+import java.util.concurrent.ConcurrentHashMap
 
 class DeezerTrackClient(private val deezerExtension: DeezerExtension, private val api: DeezerApi, private val parser: DeezerParser) {
 
     private val client by lazy { OkHttpClient() }
+    private val detailedTrackCache = ConcurrentHashMap<String, Track>()
 
     private fun extractUrlFromJson(json: JsonObject): String? {
         val data = json["data"]?.jsonArray?.firstOrNull()?.asObject() ?: return null
@@ -136,6 +139,31 @@ class DeezerTrackClient(private val deezerExtension: DeezerExtension, private va
 
     private val qualityOptions = listOf("flac", "320", "128")
 
+    /**
+     * Tracks coming from the public discography endpoints do not include the
+     * internal track token. Fetch the full track lazily when it is about to be
+     * played so that 128 kbps fallback and all existing quality paths keep
+     * working.
+     */
+    private suspend fun ensureTrackDetails(track: Track): Track {
+        if (!track.extras["TRACK_TOKEN"].isNullOrEmpty()) return track
+        detailedTrackCache[track.id]?.let { cached ->
+            return cached.copy(extras = track.extras + cached.extras)
+        }
+        val detailed = try {
+            val jsonObject = api.track(track.id)
+            val resultsObject = jsonObject["results"]?.asObject() ?: return track
+            parser.run { resultsObject.toTrack() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return track
+        }
+        if (detailed.id.isBlank() || detailed.extras["TRACK_TOKEN"].isNullOrEmpty()) return track
+        detailedTrackCache[track.id] = detailed
+        return detailed.copy(extras = track.extras + detailed.extras)
+    }
+
     suspend fun loadTrack(track: Track): Track {
         deezerExtension.handleArlExpiration()
 
@@ -143,17 +171,18 @@ class DeezerTrackClient(private val deezerExtension: DeezerExtension, private va
             return track
         }
 
-        val isMp3Misc = track.extras["FILESIZE_MP3_MISC"]?.let { it != "0" } ?: false
+        val detailedTrack = ensureTrackDetails(track)
+        val isMp3Misc = detailedTrack.extras["FILESIZE_MP3_MISC"]?.let { it != "0" } ?: false
 
         val streamables = if (isMp3Misc) {
             listOf(
                 Streamable.server(
-                    id = "$placeholderPrefix${track.id}:mp3",
+                    id = "$placeholderPrefix${detailedTrack.id}:mp3",
                     quality = 0,
                     title = "MP3",
                     extras = mapOf(
-                        "TRACK_TOKEN" to track.extras["TRACK_TOKEN"].orEmpty(),
-                        "FALLBACK_ID" to track.extras["FALLBACK_ID"].orEmpty()
+                        "TRACK_TOKEN" to detailedTrack.extras["TRACK_TOKEN"].orEmpty(),
+                        "FALLBACK_ID" to detailedTrack.extras["FALLBACK_ID"].orEmpty()
                     )
                 )
             )
@@ -172,17 +201,17 @@ class DeezerTrackClient(private val deezerExtension: DeezerExtension, private va
                     else -> "UNKNOWN"
                 }
                 Streamable.server(
-                    id = "$placeholderPrefix${track.id}:$quality",
+                    id = "$placeholderPrefix${detailedTrack.id}:$quality",
                     quality = qualityValue,
                     title = qualityTitle,
                     extras = mapOf(
-                        "TRACK_TOKEN" to track.extras["TRACK_TOKEN"].orEmpty(),
-                        "FALLBACK_ID" to track.extras["FALLBACK_ID"].orEmpty()
+                        "TRACK_TOKEN" to detailedTrack.extras["TRACK_TOKEN"].orEmpty(),
+                        "FALLBACK_ID" to detailedTrack.extras["FALLBACK_ID"].orEmpty()
                     )
                 )
             }
         }
-        return track.copy(
+        return detailedTrack.copy(
             streamables = streamables
         )
     }

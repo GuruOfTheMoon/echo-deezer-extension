@@ -15,17 +15,35 @@ import dev.brahmkshatriya.echo.extension.Utils.str
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 
-class DeezerArtistClient(private val deezerExtension: DeezerExtension, private val api: DeezerApi, private val parser: DeezerParser) {
+class DeezerArtistClient(
+    private val deezerExtension: DeezerExtension,
+    private val api: DeezerApi,
+    private val parser: DeezerParser,
+    private val discography: DeezerDiscographyClient
+) {
 
     fun getShelves(artist: Artist): Feed<Shelf> = PagedData.Single {
         deezerExtension.handleArlExpiration()
         val jsonObject = api.artist(artist.id)
-        val resultsObject = jsonObject["results"]?.asObject() ?: return@Single emptyList()
+        val resultsObject = jsonObject["results"]?.asObject()
 
-        orderedKeys.mapNotNull { key ->
-            val payload = resultsObject[key] ?: return@mapNotNull null
-            shelfFactories[key]?.invoke(parser, payload.asObject())
+        val shelves = resultsObject?.let { results ->
+            orderedKeys.mapNotNull { key ->
+                val payload = results[key] ?: return@mapNotNull null
+                shelfFactories[key]?.invoke(parser, payload.asObject())
+            }
+        }.orEmpty()
+
+        val loadedArtist = resultsObject?.let { results ->
+            runCatching { parser.run { results.toArtist() } }.getOrNull()
         }
+        val displayArtist = artist.copy(
+            name = artist.name.ifBlank { loadedArtist?.name ?: "Artist" },
+            cover = artist.cover ?: loadedArtist?.cover,
+            bio = artist.bio ?: loadedArtist?.bio
+        )
+
+        listOf(Shelf.Item(discography.createVirtualPlaylist(displayArtist))) + shelves
     }.toFeed()
 
     suspend fun loadArtist(artist: Artist): Artist {

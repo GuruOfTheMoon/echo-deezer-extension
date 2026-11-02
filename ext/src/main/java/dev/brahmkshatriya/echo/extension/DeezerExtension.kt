@@ -46,6 +46,7 @@ import dev.brahmkshatriya.echo.extension.Utils.asObject
 import dev.brahmkshatriya.echo.extension.Utils.str
 import dev.brahmkshatriya.echo.extension.clients.DeezerAlbumClient
 import dev.brahmkshatriya.echo.extension.clients.DeezerArtistClient
+import dev.brahmkshatriya.echo.extension.clients.DeezerDiscographyClient
 import dev.brahmkshatriya.echo.extension.clients.DeezerHomeFeedClient
 import dev.brahmkshatriya.echo.extension.clients.DeezerLibraryClient
 import dev.brahmkshatriya.echo.extension.clients.DeezerLyricsClient
@@ -416,7 +417,9 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
 
     //<============= Playlist =============>
 
-    private val deezerPlaylistClient by lazy { DeezerPlaylistClient(this, api, parser) }
+    private val deezerDiscographyClient by lazy { DeezerDiscographyClient(api, parser) }
+
+    private val deezerPlaylistClient by lazy { DeezerPlaylistClient(this, api, parser, deezerDiscographyClient) }
 
     override suspend fun loadFeed(playlist: Playlist): Feed<Shelf> = deezerPlaylistClient.getShelves(playlist)
 
@@ -426,7 +429,7 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
 
     //<============= Artist =============>
 
-    private val deezerArtistClient by lazy { DeezerArtistClient(this, api, parser) }
+    private val deezerArtistClient by lazy { DeezerArtistClient(this, api, parser, deezerDiscographyClient) }
 
     override suspend fun loadFeed(artist: Artist): Feed<Shelf> = deezerArtistClient.getShelves(artist)
 

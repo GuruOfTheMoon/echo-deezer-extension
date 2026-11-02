@@ -50,8 +50,9 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.PASSWORD }}
         run: |
           VERSION="v${GITHUB_SHA::7}"
+          APP_PATH="app/build/${EXT_ID}-${VERSION}.eapk"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "APP_PATH=app/build/${EXT_ID}-${VERSION}.eapk" >> "$GITHUB_ENV"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
 
           ./gradlew assembleRelease \
             -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/signing-key.jks" \

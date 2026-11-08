@@ -65,7 +65,7 @@ class DeezerApi(private val session: DeezerSession) {
         private const val PIPE = "https://pipe.deezer.com/api"
         private const val AUTH = "https://auth.deezer.com/login/anonymous"
 
-        private const val LYRICS_QUERY = "query SynchronizedTrackLyrics(\$trackId: String!) { track(trackId: \$trackId) { lyrics { synchronizedLines { lrcTimestamp line } } } }"
+        private const val LYRICS_QUERY = "query SynchronizedTrackLyrics(\$trackId: String!) { track(trackId: \$trackId) { id lyrics { id text synchronizedLines { line milliseconds duration } } } }"
     }
 
     private val language: String

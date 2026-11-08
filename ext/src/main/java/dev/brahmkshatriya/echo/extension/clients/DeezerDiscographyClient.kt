@@ -23,6 +23,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonArray
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -32,9 +34,11 @@ import java.util.concurrent.ConcurrentHashMap
  * discography (albums, EPs and singles).
  *
  * The releases and their tracks are fetched through the public Deezer API and
- * cached in memory for the lifetime of the extension session. Tracks are
- * deduplicated across standard/deluxe editions by ISRC, falling back to
- * title + duration when an ISRC is unavailable.
+ * cached on disk until the artist has not been opened for [CACHE_TTL_MS].
+ * Opening a playlist only rescans the release list and fetches tracks for
+ * releases that are not cached yet. Tracks are deduplicated across
+ * standard/deluxe editions by ISRC, falling back to title + duration when an
+ * ISRC is unavailable.
  */
 class DeezerDiscographyClient(
     private val api: DeezerApi,
@@ -43,6 +47,8 @@ class DeezerDiscographyClient(
 
     private val releaseCache = ConcurrentHashMap<String, List<Release>>()
     private val trackCache = ConcurrentHashMap<String, List<Track>>()
+    private val refreshRequested = ConcurrentHashMap.newKeySet<String>()
+    private val diskCache = DiscographyCache()
     private val locks = ConcurrentHashMap<String, Mutex>()
     private val requestSemaphore = Semaphore(CONCURRENCY)
 
@@ -106,6 +112,7 @@ class DeezerDiscographyClient(
     }
 
     fun getDiscographyFeed(artist: Artist, cover: ImageHolder? = artist.cover): Feed<Track> {
+        refreshRequested.add(artist.id)
         val pagedData = PagedData.Continuous { continuation ->
             val releases = getReleases(artist)
             val start = continuation?.toIntOrNull()?.coerceAtLeast(0) ?: 0
@@ -121,10 +128,49 @@ class DeezerDiscographyClient(
     }
 
     private suspend fun getReleases(artist: Artist): List<Release> {
-        releaseCache[artist.id]?.let { return it }
-        return mutexFor("releases:${artist.id}").withLock {
-            releaseCache[artist.id] ?: fetchReleases(artist.id).also { releaseCache[artist.id] = it }
+        releaseCache[artist.id]?.let {
+            if (!refreshRequested.contains(artist.id)) return it
         }
+        return mutexFor("releases:${artist.id}").withLock {
+            val memory = releaseCache[artist.id]
+            if (memory != null && !refreshRequested.remove(artist.id)) return@withLock memory
+            refreshRequested.remove(artist.id)
+
+            val now = System.currentTimeMillis()
+            val entry = withContext(Dispatchers.IO) {
+                diskCache.pruneExpired(now, CACHE_TTL_MS)
+                diskCache.read(artist.id)
+            }
+            val cached = memory ?: if (entry != null && now - entry.lastAccess <= CACHE_TTL_MS) {
+                entry.releases
+            } else {
+                if (entry != null) withContext(Dispatchers.IO) { diskCache.delete(artist.id) }
+                emptyList()
+            }
+
+            val fresh = try {
+                fetchReleases(artist.id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (cached.isEmpty()) throw e
+                null
+            }
+            val releases = fresh?.let { mergeReleases(cached, it) } ?: cached
+
+            releaseCache[artist.id] = releases
+            withContext(Dispatchers.IO) { diskCache.write(artist.id, now, releases) }
+            releases
+        }
+    }
+
+    private fun mergeReleases(cached: List<Release>, fresh: List<Release>): List<Release> {
+        val byId = LinkedHashMap<String, Release>(cached.size + fresh.size)
+        cached.forEach { byId[it.id] = it }
+        fresh.forEach { byId[it.id] = it }
+        return byId.values.sortedWith(
+            compareBy<Release> { it.releaseDate ?: "9999-99-99" }.thenBy { it.index }
+        )
     }
 
     private suspend fun fetchReleases(artistId: String): List<Release> {
@@ -211,14 +257,52 @@ class DeezerDiscographyClient(
     }
 
     private suspend fun getAlbumTracks(artist: Artist, release: Release): List<Track> {
+        // shortcut: if Deezer adds tracks to an existing release id, that list
+        // stays stale until the artist cache is purged after 7 idle days.
         val key = "${artist.id}:${release.id}"
         trackCache[key]?.let { return it }
         return mutexFor("tracks:$key").withLock {
-            trackCache[key] ?: fetchAlbumTracks(artist, release).also { trackCache[key] = it }
+            trackCache[key] ?: run {
+                val data = withContext(Dispatchers.IO) {
+                    diskCache.readTracks(artist.id, release.id)
+                }
+                val tracks = if (data != null) {
+                    parseAlbumTracks(artist, release, data)
+                } else {
+                    fetchAlbumTracks(artist, release)
+                }
+                if (tracks.isNotEmpty()) trackCache[key] = tracks
+                tracks
+            }
         }
     }
 
     private suspend fun fetchAlbumTracks(artist: Artist, release: Release): List<Track> {
+        val data = mutableListOf<JsonElement>()
+        var index = 0
+        var total: Int? = null
+        while (index < MAX_TRACKS_PER_RELEASE) {
+            val result = api.albumTracks(release.id, index, TRACK_PAGE_SIZE)
+            val page = result["data"]?.jsonArray ?: break
+            if (page.isEmpty()) break
+
+            data.addAll(page)
+            index += page.size
+            total = result.str("total")?.toIntOrNull() ?: total
+            if (total != null && index >= total) break
+            if (page.size < TRACK_PAGE_SIZE) break
+        }
+        if (data.isNotEmpty()) {
+            withContext(Dispatchers.IO) { diskCache.writeTracks(artist.id, release.id, data) }
+        }
+        return parseAlbumTracks(artist, release, data)
+    }
+
+    private fun parseAlbumTracks(
+        artist: Artist,
+        release: Release,
+        data: List<JsonElement>
+    ): List<Track> {
         val tracks = mutableListOf<Track>()
         val releaseDate = parseDate(release.releaseDate)
         val releaseCover = parser.getCover(release.md5, "cover")
@@ -231,59 +315,46 @@ class DeezerDiscographyClient(
             releaseDate = releaseDate
         )
 
-        var index = 0
-        var total: Int? = null
-        while (index < MAX_TRACKS_PER_RELEASE) {
-            val result = api.albumTracks(release.id, index, TRACK_PAGE_SIZE)
-            val data = result["data"]?.jsonArray ?: break
-            if (data.isEmpty()) break
+        data.forEach { element ->
+            val obj = element.asObject()
+            val id = obj.str("id") ?: return@forEach
+            val trackArtistObject = runCatching { obj["artist"]?.asObject() }.getOrNull()
+            val trackArtist = Artist(
+                id = trackArtistObject?.str("id") ?: artist.id,
+                name = trackArtistObject?.str("name") ?: artist.name,
+                cover = artist.cover
+            )
+            val title = obj.str("title").orEmpty()
+                .ifBlank { obj.str("title_short").orEmpty() }
+            val cover = parser.getCover(obj.str("md5_image") ?: release.md5, "cover")
+                ?: releaseCover
 
-            data.forEach { element ->
-                val obj = element.asObject()
-                val id = obj.str("id") ?: return@forEach
-                val trackArtistObject = runCatching { obj["artist"]?.asObject() }.getOrNull()
-                val trackArtist = Artist(
-                    id = trackArtistObject?.str("id") ?: artist.id,
-                    name = trackArtistObject?.str("name") ?: artist.name,
-                    cover = artist.cover
+            tracks += Track(
+                id = id,
+                title = title,
+                cover = cover,
+                artists = listOf(trackArtist),
+                album = album.copy(artists = listOf(trackArtist)),
+                duration = obj.str("duration")?.toLongOrNull()?.times(1000),
+                releaseDate = releaseDate,
+                isrc = obj.str("isrc")?.takeIf { it.isNotBlank() },
+                albumOrderNumber = obj.str("track_position")?.toLongOrNull(),
+                albumDiscNumber = obj.str("disk_number")?.toLongOrNull(),
+                isExplicit = obj.str("explicit_lyrics") == "true",
+                isPlayable = if (obj.str("readable") == "false") {
+                    Track.Playable.No("Not readable in your region")
+                } else {
+                    Track.Playable.Yes
+                },
+                extras = mapOf(
+                    "album_id" to release.id,
+                    VIRTUAL_KEY to VIRTUAL_VALUE,
+                    "TRACK_TOKEN" to "",
+                    "FALLBACK_ID" to "",
+                    "FILESIZE_MP3_MISC" to "0",
+                    "TYPE" to "cover"
                 )
-                val title = obj.str("title").orEmpty()
-                    .ifBlank { obj.str("title_short").orEmpty() }
-                val cover = parser.getCover(obj.str("md5_image") ?: release.md5, "cover")
-                    ?: releaseCover
-
-                tracks += Track(
-                    id = id,
-                    title = title,
-                    cover = cover,
-                    artists = listOf(trackArtist),
-                    album = album.copy(artists = listOf(trackArtist)),
-                    duration = obj.str("duration")?.toLongOrNull()?.times(1000),
-                    releaseDate = releaseDate,
-                    isrc = obj.str("isrc")?.takeIf { it.isNotBlank() },
-                    albumOrderNumber = obj.str("track_position")?.toLongOrNull(),
-                    albumDiscNumber = obj.str("disk_number")?.toLongOrNull(),
-                    isExplicit = obj.str("explicit_lyrics") == "true",
-                    isPlayable = if (obj.str("readable") == "false") {
-                        Track.Playable.No("Not readable in your region")
-                    } else {
-                        Track.Playable.Yes
-                    },
-                    extras = mapOf(
-                        "album_id" to release.id,
-                        VIRTUAL_KEY to VIRTUAL_VALUE,
-                        "TRACK_TOKEN" to "",
-                        "FALLBACK_ID" to "",
-                        "FILESIZE_MP3_MISC" to "0",
-                        "TYPE" to "cover"
-                    )
-                )
-            }
-
-            index += data.size
-            total = result.str("total")?.toIntOrNull() ?: total
-            if (total != null && index >= total) break
-            if (data.size < TRACK_PAGE_SIZE) break
+            )
         }
         return tracks
     }
@@ -328,15 +399,6 @@ class DeezerDiscographyClient(
         return locks.computeIfAbsent(key) { Mutex() }
     }
 
-    private data class Release(
-        val id: String,
-        val title: String,
-        val releaseDate: String?,
-        val md5: String?,
-        val recordType: String?,
-        val index: Int
-    )
-
     private companion object {
         private const val VIRTUAL_ID_PREFIX = "deezer-all-songs-"
         private const val VIRTUAL_KEY = "deezer_virtual"
@@ -350,6 +412,8 @@ class DeezerDiscographyClient(
         private const val CONCURRENCY = 4
         private const val MAX_RELEASES = 5000
         private const val MAX_TRACKS_PER_RELEASE = 2000
+
+        private const val CACHE_TTL_MS = 7L * 24 * 60 * 60 * 1000
 
         private val WHITESPACE_REGEX = Regex("\\s+")
     }

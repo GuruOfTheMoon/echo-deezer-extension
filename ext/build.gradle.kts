@@ -18,6 +18,8 @@ dependencies {
     val libVersion: String by project
     compileOnly("dev.brahmkshatriya.echo:common:$libVersion")
     compileOnly("org.jetbrains.kotlin:kotlin-stdlib:2.2.10")
+    testImplementation("dev.brahmkshatriya.echo:common:$libVersion")
+    testImplementation("junit:junit:4.13.2")
 }
 
 val extType: String by project

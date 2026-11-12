@@ -16,6 +16,23 @@ import java.util.Locale
  */
 object AlternativeVersions {
 
+    /**
+     * Human readable names for every kind of alternative version that can be
+     * detected. Used by the settings to let the user pick what to skip.
+     */
+    val kindLabels: Map<String, String> = linkedMapOf(
+        "remix" to "Remixes & bootlegs",
+        "speed" to "Sped up / slowed down",
+        "live" to "Live recordings",
+        "cover" to "Covers",
+        "instrumental" to "Instrumental / karaoke",
+        "edit" to "Edits & extended mixes",
+        "demo" to "Demos",
+        "acoustic" to "Acoustic versions",
+        "chip" to "8-bit / chiptune",
+        "soundtrack" to "Soundtrack versions"
+    )
+
     private val bracketRegex = Regex("[(\uFF08\\[{]([^)\uFF09\\]}]*)[)\uFF09\\]}]")
     private val dashRegex = Regex("\\s+[-\u2013\u2014]\\s*")
     private val whitespaceRegex = Regex("\\s+")
@@ -113,9 +130,16 @@ object AlternativeVersions {
      *
      * @param customKeywords additional keywords supplied by the user. These
      * are matched anywhere in the title.
+     * @param kinds the kinds of alternative versions to skip. Defaults to all
+     * of [kindLabels].
      */
-    fun isAlternative(title: String, customKeywords: List<String> = emptyList()): Boolean {
-        if (kind(title) != null) return true
+    fun isAlternative(
+        title: String,
+        customKeywords: List<String> = emptyList(),
+        kinds: Set<String> = kindLabels.keys,
+    ): Boolean {
+        val titleKind = kind(title)
+        if (titleKind != null && titleKind in kinds) return true
         val normalized = normalize(title)
         if (normalized.isBlank()) return false
         return customKeywords.any { keyword ->

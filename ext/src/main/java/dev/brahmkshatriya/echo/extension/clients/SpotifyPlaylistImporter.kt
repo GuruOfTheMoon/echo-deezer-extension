@@ -353,10 +353,22 @@ private fun JsonObject.text(key: String): String? {
     return (element as? JsonPrimitive)?.content?.takeUnless { it == "null" }
 }
 
-private fun JsonObject.errorMessage(): String? {
+/**
+ * Returns the error message of a Deezer API response, or null when the
+ * response is successful. Deezer reports success with an empty `error` field
+ * (`[]`, `{}` or `""`), so an empty error must not be treated as a failure.
+ */
+internal fun JsonObject.errorMessage(): String? {
     val error = this["error"] ?: return null
     if (error is JsonNull) return null
-    if (error is JsonPrimitive) return error.content
+    if (error is JsonPrimitive) {
+        return error.content.takeIf { it.isNotBlank() && it != "false" && it != "0" }
+    }
+    if (error is JsonArray) return if (error.isEmpty()) null else error.toString()
     val objectError = error as? JsonObject ?: return error.toString()
-    return objectError.text("message") ?: objectError.toString()
+    if (objectError.isEmpty()) return null
+    return objectError.text("message")
+        ?: objectError.text("VALID_TOKEN_REQUIRED")
+        ?: objectError.text("error")
+        ?: objectError.toString()
 }

@@ -73,6 +73,40 @@ class AlternativeVersionsTest {
     }
 
     @Test
+    fun skipsOnlySelectedKinds() {
+        assertTrue(
+            AlternativeVersions.isAlternative("Song (Remix)", kinds = setOf("remix", "live"))
+        )
+        assertFalse(
+            AlternativeVersions.isAlternative("Song (Remix)", kinds = setOf("live"))
+        )
+        assertFalse(AlternativeVersions.isAlternative("Song (Remix)", kinds = emptySet()))
+
+        // Custom keywords still apply when their kind is not selected.
+        assertTrue(
+            AlternativeVersions.isAlternative(
+                "Song (Orchestral)",
+                customKeywords = listOf("orchestral"),
+                kinds = emptySet()
+            )
+        )
+    }
+
+    @Test
+    fun everyDetectedKindHasALabel() {
+        val titles = listOf(
+            "Song (Remix)", "Song (Sped Up)", "Song - Live", "Song (Cover)",
+            "Song (Instrumental)", "Song Radio Edit", "Song (Demo)", "Song (Acoustic)",
+            "Song (8 Bit)", "Song (From the Movie)"
+        )
+        titles.forEach { title ->
+            val kind = AlternativeVersions.kind(title)
+            assertTrue("$title is detected", kind != null)
+            assertTrue("$kind has a label", AlternativeVersions.kindLabels.containsKey(kind))
+        }
+    }
+
+    @Test
     fun buildsBaseTitles() {
         assertEquals("song", AlternativeVersions.baseTitle("Song (Remix)"))
         assertEquals("song", AlternativeVersions.baseTitle("Song - Live"))

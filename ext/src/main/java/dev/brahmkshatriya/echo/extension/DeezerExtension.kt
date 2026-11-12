@@ -41,6 +41,7 @@ import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.SettingCategory
 import dev.brahmkshatriya.echo.common.settings.SettingItem
 import dev.brahmkshatriya.echo.common.settings.SettingList
+import dev.brahmkshatriya.echo.common.settings.SettingMultipleChoice
 import dev.brahmkshatriya.echo.common.settings.SettingOnClick
 import dev.brahmkshatriya.echo.common.settings.SettingSlider
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
@@ -147,11 +148,19 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
                         "Automatically skip remixes, slowed/sped-up versions, live recordings, covers and similar versions",
                         false
                     ),
+                    SettingMultipleChoice(
+                        "Versions to Skip",
+                        "skip_alternative_kinds",
+                        "Choose which kinds to skip while the switch above is on",
+                        AlternativeVersions.kindLabels.values.toList(),
+                        AlternativeVersions.kindLabels.keys.toList(),
+                        AlternativeVersions.kindLabels.keys.indices.toSet()
+                    ),
                     SettingTextInput(
                         "Custom Skip Keywords",
                         "skip_alternatives_keywords",
                         "Comma-separated keywords that should also be skipped, matched anywhere in the title",
-                        ""
+                        session.settings?.getString("skip_alternatives_keywords").orEmpty()
                     )
                 )
             ),
@@ -163,7 +172,7 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
                         "Spotify Playlist Link",
                         "spotify_playlist_url",
                         "Paste a public Spotify playlist link, then use the button below",
-                        ""
+                        session.settings?.getString("spotify_playlist_url").orEmpty()
                     ),
                     SettingOnClick(
                         "Import Playlist to Deezer",
@@ -743,7 +752,11 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
         val track = details.track
         if (track.type != Track.Type.Song) return
 
-        val isAlternative = AlternativeVersions.isAlternative(track.title, customSkipKeywords)
+        val isAlternative = AlternativeVersions.isAlternative(
+            track.title,
+            customSkipKeywords,
+            skipKinds
+        )
         val decision = synchronized(autoSkipLock) {
             if (!isAlternative) {
                 consecutiveSkips = 0
@@ -817,6 +830,9 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
             ?.map { it.trim() }
             ?.filter { it.isNotEmpty() }
             .orEmpty()
+    private val skipKinds: Set<String>
+        get() = session.settings?.getStringSet("skip_alternative_kinds")
+            ?: AlternativeVersions.kindLabels.keys
 
     companion object {
         private val dispatcher = Dispatchers.Default

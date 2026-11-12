@@ -62,14 +62,17 @@ import dev.brahmkshatriya.echo.extension.clients.DeezerRadioClient
 import dev.brahmkshatriya.echo.extension.clients.DeezerSearchClient
 import dev.brahmkshatriya.echo.extension.clients.DeezerTrackClient
 import dev.brahmkshatriya.echo.extension.clients.SpotifyPlaylistImporter
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
+import java.util.concurrent.atomic.AtomicBoolean
 
 class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
     SearchFeedClient, QuickSearchClient,AlbumClient, ArtistClient, FollowClient, PlaylistClient, LyricsClient, ShareClient,
@@ -83,7 +86,11 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
 
     private val spotifyImporter by lazy { SpotifyPlaylistImporter(this, api) }
     private val playbackSkipper by lazy { PlaybackSkipper() }
-    private val importMutex = Mutex()
+
+    // Imports must outlive the settings screen, so they run in a scope owned by
+    // the extension instead of the settings ViewModel.
+    private val importScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val importRunning = AtomicBoolean(false)
 
     private var messageFlow: MutableSharedFlow<Message>? = null
 
@@ -91,8 +98,8 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
         this.messageFlow = messageFlow
     }
 
-    private fun sendMessage(message: String) {
-        messageFlow?.tryEmit(Message(message))
+    private suspend fun sendMessage(message: String) {
+        messageFlow?.emit(Message(message))
     }
 
     override suspend fun getSettingItems(): List<Setting> {
@@ -178,7 +185,7 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
                         "Import Playlist to Deezer",
                         "spotify_import_button",
                         "Create a new Deezer playlist from the link above",
-                        onClick = { importSpotifyPlaylist() }
+                        onClick = { startSpotifyImport() }
                     ),
                     SettingItem(
                         "Last Import",
@@ -238,51 +245,63 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
     override suspend fun onSettingsChanged(settings: Settings, key: String?) {
         session.settings = settings
         if (key == "spotify_import_button") {
-            importSpotifyPlaylist()
+            startSpotifyImport()
         }
     }
 
     //<============= Spotify import =============>
 
-    private suspend fun importSpotifyPlaylist() {
-        if (!importMutex.tryLock()) return
-        try {
-            val settings = session.settings
-            val link = settings?.getString("spotify_playlist_url")?.trim().orEmpty()
-            if (link.isEmpty()) {
-                sendMessage("Paste a Spotify playlist link first.")
-                return
+    private fun startSpotifyImport() {
+        if (!importRunning.compareAndSet(false, true)) return
+        importScope.launch {
+            try {
+                importSpotifyPlaylist()
+            } finally {
+                importRunning.set(false)
             }
-
-            sendMessage("Importing the Spotify playlist\u2026")
-            val result = runCatching {
-                spotifyImporter.import(link) { status -> sendMessage(status) }
-            }.getOrElse { throwable ->
-                val message = when (throwable) {
-                    is ClientException.LoginRequired ->
-                        "Log in to Deezer before importing a playlist."
-                    else -> throwable.message
-                        ?: "The Spotify playlist could not be imported."
-                }
-                settings?.putString("spotify_import_status", "Import failed: $message")
-                sendMessage(message)
-                return
-            }
-
-            val status = buildString {
-                append("Imported \"").append(result.spotifyName)
-                append("\" to Deezer as \"").append(result.playlistTitle).append("\": ")
-                append(result.matchedTracks).append("/").append(result.totalTracks)
-                append(" tracks")
-                if (result.notFound.isNotEmpty()) {
-                    append(" (").append(result.notFound.size).append(" not found)")
-                }
-            }
-            settings?.putString("spotify_import_status", status)
-            sendMessage(status)
-        } finally {
-            importMutex.unlock()
         }
+    }
+
+    private suspend fun importSpotifyPlaylist() {
+        val link = session.settings?.getString("spotify_playlist_url")?.trim().orEmpty()
+        if (link.isEmpty()) {
+            reportImportStatus("Paste a Spotify playlist link first.")
+            return
+        }
+
+        reportImportStatus("Importing Spotify playlist\u2026 you can leave this screen")
+        val result = runCatching {
+            spotifyImporter.import(link) { status -> reportImportStatus(status) }
+        }.getOrElse { throwable ->
+            val message = when (throwable) {
+                is ClientException.LoginRequired ->
+                    "Log in to Deezer before importing a playlist."
+                else -> throwable.message
+                    ?: "The Spotify playlist could not be imported."
+            }
+            reportImportStatus("Import failed: $message")
+            return
+        }
+
+        val status = buildString {
+            append("Imported \"").append(result.spotifyName)
+            append("\" to Deezer as \"").append(result.playlistTitle).append("\": ")
+            append(result.matchedTracks).append("/").append(result.totalTracks)
+            append(" tracks")
+            if (result.notFound.isNotEmpty()) {
+                append(" (").append(result.notFound.size).append(" not found)")
+            }
+        }
+        reportImportStatus(status)
+    }
+
+    /**
+     * Persists the latest status so it is still visible when the settings
+     * screen is reopened, and announces it in the running app.
+     */
+    private suspend fun reportImportStatus(status: String) {
+        session.settings?.putString("spotify_import_status", status)
+        sendMessage(status)
     }
 
     //<============= HomeTab =============>

@@ -91,11 +91,11 @@ class SpotifyPlaylistImporter(
             throw Exception("None of the Spotify tracks could be found on Deezer.")
         }
 
-        onStatus("Creating the Deezer playlist\u2026")
         val playlistTitle = spotifyPlaylist.name.take(MAX_PLAYLIST_TITLE_LENGTH)
             .ifBlank { "Imported Spotify Playlist" }
         val playlistDescription = buildDescription(spotifyPlaylist)
 
+        onStatus("Creating Deezer playlist \"$playlistTitle\"\u2026")
         val created = api.createPlaylist(playlistTitle, playlistDescription)
         created.errorMessage()?.let {
             throw Exception("Could not create the Deezer playlist: $it")

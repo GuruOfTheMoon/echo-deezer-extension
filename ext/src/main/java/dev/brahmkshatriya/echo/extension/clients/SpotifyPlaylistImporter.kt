@@ -37,7 +37,8 @@ class SpotifyPlaylistImporter(
         val spotifyName: String,
         val totalTracks: Int,
         val matchedTracks: Int,
-        val notFound: List<String>,
+        val duplicateTracks: Int,
+        val notFoundTracks: Int,
     )
 
     suspend fun import(
@@ -56,7 +57,7 @@ class SpotifyPlaylistImporter(
 
         onStatus("Matching ${tracks.size} Spotify tracks on Deezer\u2026")
         val matches = arrayOfNulls<DeezerCandidate>(tracks.size)
-        val notFound = mutableListOf<String>()
+        var notFoundTracks = 0
         val stateMutex = Mutex()
         var processed = 0
         val progressStep = (tracks.size / 4).coerceAtLeast(10)
@@ -69,9 +70,7 @@ class SpotifyPlaylistImporter(
                         val match = findMatch(track)
                         val progress = stateMutex.withLock {
                             if (match == null) {
-                                if (notFound.size < MAX_REPORTED_MISSES) {
-                                    notFound += track.displayName
-                                }
+                                notFoundTracks++
                             } else {
                                 matches[index] = match
                             }
@@ -86,10 +85,14 @@ class SpotifyPlaylistImporter(
             }
         }
 
-        val matched = matches.filterNotNull()
-        if (matched.isEmpty()) {
+        val matchedAll = matches.filterNotNull()
+        if (matchedAll.isEmpty()) {
             throw Exception("None of the Spotify tracks could be found on Deezer.")
         }
+        // Deezer rejects a playlist batch containing a song that is already in
+        // it, so repeated songs from the Spotify playlist must be removed.
+        val matched = matchedAll.distinctBy { it.id }
+        val duplicateTracks = matchedAll.size - matched.size
 
         val playlistTitle = spotifyPlaylist.name.take(MAX_PLAYLIST_TITLE_LENGTH)
             .ifBlank { "Imported Spotify Playlist" }
@@ -133,7 +136,8 @@ class SpotifyPlaylistImporter(
             spotifyName = spotifyPlaylist.name,
             totalTracks = tracks.size,
             matchedTracks = matched.size,
-            notFound = notFound
+            duplicateTracks = duplicateTracks,
+            notFoundTracks = notFoundTracks
         )
     }
 
@@ -209,7 +213,6 @@ class SpotifyPlaylistImporter(
         private const val SEARCH_ATTEMPTS = 2
         private const val SEARCH_LIMIT = 10
         private const val MAX_CANDIDATES = 30
-        private const val MAX_REPORTED_MISSES = 50
         private const val ADD_CHUNK_SIZE = 100
         private const val MAX_PLAYLIST_TITLE_LENGTH = 100
         private const val MAX_PLAYLIST_DESCRIPTION_LENGTH = 1_000
@@ -367,8 +370,10 @@ internal fun JsonObject.errorMessage(): String? {
     if (error is JsonArray) return if (error.isEmpty()) null else error.toString()
     val objectError = error as? JsonObject ?: return error.toString()
     if (objectError.isEmpty()) return null
+    val firstValue = objectError.values.firstOrNull { it is JsonPrimitive } as? JsonPrimitive
     return objectError.text("message")
         ?: objectError.text("VALID_TOKEN_REQUIRED")
         ?: objectError.text("error")
+        ?: firstValue?.content
         ?: objectError.toString()
 }

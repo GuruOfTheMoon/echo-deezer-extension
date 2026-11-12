@@ -22,12 +22,7 @@ data class SpotifyTrack(
     val artists: List<String>,
     val durationMs: Long? = null,
     val album: String? = null,
-) {
-    val artistLine: String get() = artists.joinToString(", ")
-
-    val displayName: String
-        get() = if (artistLine.isBlank()) title else "$title \u2014 $artistLine"
-}
+)
 
 data class SpotifyPlaylist(
     val id: String,

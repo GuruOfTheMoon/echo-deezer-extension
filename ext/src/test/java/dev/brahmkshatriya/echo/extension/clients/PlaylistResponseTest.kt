@@ -27,6 +27,10 @@ class PlaylistResponseTest {
             "Invalid CSRF token",
             errorOf("""{"error":{"VALID_TOKEN_REQUIRED":"Invalid CSRF token"}}""")
         )
+        assertEquals(
+            "this song already exists in this playlist",
+            errorOf("""{"error":{"ERROR_DATA_EXISTS":"this song already exists in this playlist"}}""")
+        )
         assertNotNull(errorOf("""{"error":[{"code":4}]}"""))
     }
 }

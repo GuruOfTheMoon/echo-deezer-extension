@@ -54,6 +54,8 @@ Ensure you have Echo installed on your device before proceeding. Currently it's 
 
 3. Select **Deezer All Songs** and download it.
 4. When the installer asks, choose **File** installation to load it as an Echo extension. Choose **App** only if you also want the Deezer link handler installed as a separate app.
+
+> The **App** option installs the tiny companion link-handler app. It has no icon or UI and requests no permissions, so Android may open its App-info page showing an empty permission list and a greyed-out **Notifications** toggle. That is expected — choose **File** if you do not need Deezer link handling.
 5. Launch Echo and select the extension.
 
 The extension will check this repository's GitHub releases for updates automatically.
@@ -80,6 +82,10 @@ A signed release requires the `KEYSTORE_B64` and `PASSWORD` repository secrets u
 ### How is FLAC/320 possible without a Premium Account?
 
 > *"Well, I host a server that gives back the premium songs. It was created by [@uhwot](https://github.com/uhwot), and I simply stumbled upon it while doing research about stuff for Deezer.*"
+
+### Why does Android show an app with no permissions and a greyed-out Notifications toggle?
+
+> The `.eapk` also works as a companion app that only opens Deezer links in Echo. It has no icon, no UI and never posts notifications, so Android lists no user-facing permissions and disables the Notifications toggle. It needs no permission — pick **File** during installation if you do not want the link handler.
 
 ## Acknowledgements
 

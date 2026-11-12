@@ -288,9 +288,15 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
             append("\" to Deezer as \"").append(result.playlistTitle).append("\": ")
             append(result.matchedTracks).append("/").append(result.totalTracks)
             append(" tracks")
-            if (result.notFound.isNotEmpty()) {
-                append(" (").append(result.notFound.size).append(" not found)")
+            val details = buildList {
+                if (result.duplicateTracks > 0) {
+                    add("${result.duplicateTracks} skipped duplicates")
+                }
+                if (result.notFoundTracks > 0) {
+                    add("${result.notFoundTracks} not found")
+                }
             }
+            if (details.isNotEmpty()) append(" (").append(details.joinToString(", ")).append(")")
         }
         reportImportStatus(status)
     }

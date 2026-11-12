@@ -74,7 +74,7 @@ class DeezerApi(private val session: DeezerSession) {
         private const val PUBLIC_API_MIN_INTERVAL_MS = 110L
         private const val PUBLIC_API_MAX_ATTEMPTS = 3
 
-        private const val LYRICS_QUERY = "query SynchronizedTrackLyrics(\$trackId: String!) { track(trackId: \$trackId) { lyrics { synchronizedLines { lrcTimestamp line } } } }"
+        private const val LYRICS_QUERY = "query SynchronizedTrackLyrics(\$trackId: String!) { track(trackId: \$trackId) { id lyrics { id text synchronizedLines { line milliseconds duration } } } }"
     }
 
     private val language: String

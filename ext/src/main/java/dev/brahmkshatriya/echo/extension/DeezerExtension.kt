@@ -14,6 +14,7 @@ import dev.brahmkshatriya.echo.common.clients.QuickSearchClient
 import dev.brahmkshatriya.echo.common.clients.RadioClient
 import dev.brahmkshatriya.echo.common.clients.SaveClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
+import dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient
 import dev.brahmkshatriya.echo.common.clients.ShareClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.clients.TrackerClient
@@ -24,6 +25,7 @@ import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.EchoMediaItem
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Lyrics
+import dev.brahmkshatriya.echo.common.models.Message
 import dev.brahmkshatriya.echo.common.models.NetworkRequest
 import dev.brahmkshatriya.echo.common.models.NetworkRequest.Companion.toGetRequest
 import dev.brahmkshatriya.echo.common.models.Playlist
@@ -34,11 +36,15 @@ import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.TrackDetails
 import dev.brahmkshatriya.echo.common.models.User
+import dev.brahmkshatriya.echo.common.providers.MessageFlowProvider
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.SettingCategory
+import dev.brahmkshatriya.echo.common.settings.SettingItem
 import dev.brahmkshatriya.echo.common.settings.SettingList
+import dev.brahmkshatriya.echo.common.settings.SettingOnClick
 import dev.brahmkshatriya.echo.common.settings.SettingSlider
 import dev.brahmkshatriya.echo.common.settings.SettingSwitch
+import dev.brahmkshatriya.echo.common.settings.SettingTextInput
 import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.DeezerCountries.getDefaultCountryIndex
 import dev.brahmkshatriya.echo.extension.DeezerCountries.getDefaultLanguageIndex
@@ -54,21 +60,39 @@ import dev.brahmkshatriya.echo.extension.clients.DeezerPlaylistClient
 import dev.brahmkshatriya.echo.extension.clients.DeezerRadioClient
 import dev.brahmkshatriya.echo.extension.clients.DeezerSearchClient
 import dev.brahmkshatriya.echo.extension.clients.DeezerTrackClient
+import dev.brahmkshatriya.echo.extension.clients.SpotifyPlaylistImporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 
 class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
     SearchFeedClient, QuickSearchClient,AlbumClient, ArtistClient, FollowClient, PlaylistClient, LyricsClient, ShareClient,
     TrackerClient, LoginClient.WebView, LoginClient.CustomInput,
-    LibraryFeedClient, PlaylistEditClient, SaveClient {
+    LibraryFeedClient, PlaylistEditClient, SaveClient,
+    SettingsChangeListenerClient, MessageFlowProvider {
 
     private val session by lazy { DeezerSession.getInstance() }
     private val api by lazy { DeezerApi(session) }
     private val parser by lazy { DeezerParser(session) }
+
+    private val spotifyImporter by lazy { SpotifyPlaylistImporter(this, api) }
+    private val playbackSkipper by lazy { PlaybackSkipper() }
+    private val importMutex = Mutex()
+
+    private var messageFlow: MutableSharedFlow<Message>? = null
+
+    override fun setMessageFlow(messageFlow: MutableSharedFlow<Message>) {
+        this.messageFlow = messageFlow
+    }
+
+    private fun sendMessage(message: String) {
+        messageFlow?.tryEmit(Message(message))
+    }
 
     override suspend fun getSettingItems(): List<Setting> {
         return listOf(
@@ -110,6 +134,48 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
                         120,
                         1920,
                         120
+                    )
+                )
+            ),
+            SettingCategory(
+                "Playback",
+                "playback",
+                mutableListOf(
+                    SettingSwitch(
+                        "Skip Alternative Versions",
+                        "skip_alternatives",
+                        "Automatically skip remixes, slowed/sped-up versions, live recordings, covers and similar versions",
+                        false
+                    ),
+                    SettingTextInput(
+                        "Custom Skip Keywords",
+                        "skip_alternatives_keywords",
+                        "Comma-separated keywords that should also be skipped, matched anywhere in the title",
+                        ""
+                    )
+                )
+            ),
+            SettingCategory(
+                "Spotify Playlist Import",
+                "spotify_import",
+                mutableListOf(
+                    SettingTextInput(
+                        "Spotify Playlist Link",
+                        "spotify_playlist_url",
+                        "Paste a public Spotify playlist link, then use the button below",
+                        ""
+                    ),
+                    SettingOnClick(
+                        "Import Playlist to Deezer",
+                        "spotify_import_button",
+                        "Create a new Deezer playlist from the link above",
+                        onClick = { importSpotifyPlaylist() }
+                    ),
+                    SettingItem(
+                        "Last Import",
+                        "spotify_import_status",
+                        session.settings?.getString("spotify_import_status")
+                            ?: "No playlist imported yet"
                     )
                 )
             ),
@@ -158,6 +224,56 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
 
     override suspend fun onExtensionSelected() {
         session.settings?.let { setSettings(it) }
+    }
+
+    override suspend fun onSettingsChanged(settings: Settings, key: String?) {
+        session.settings = settings
+        if (key == "spotify_import_button") {
+            importSpotifyPlaylist()
+        }
+    }
+
+    //<============= Spotify import =============>
+
+    private suspend fun importSpotifyPlaylist() {
+        if (!importMutex.tryLock()) return
+        try {
+            val settings = session.settings
+            val link = settings?.getString("spotify_playlist_url")?.trim().orEmpty()
+            if (link.isEmpty()) {
+                sendMessage("Paste a Spotify playlist link first.")
+                return
+            }
+
+            sendMessage("Importing the Spotify playlist\u2026")
+            val result = runCatching {
+                spotifyImporter.import(link) { status -> sendMessage(status) }
+            }.getOrElse { throwable ->
+                val message = when (throwable) {
+                    is ClientException.LoginRequired ->
+                        "Log in to Deezer before importing a playlist."
+                    else -> throwable.message
+                        ?: "The Spotify playlist could not be imported."
+                }
+                settings?.putString("spotify_import_status", "Import failed: $message")
+                sendMessage(message)
+                return
+            }
+
+            val status = buildString {
+                append("Imported \"").append(result.spotifyName)
+                append("\" to Deezer as \"").append(result.playlistTitle).append("\": ")
+                append(result.matchedTracks).append("/").append(result.totalTracks)
+                append(" tracks")
+                if (result.notFound.isNotEmpty()) {
+                    append(" (").append(result.notFound.size).append(" not found)")
+                }
+            }
+            settings?.putString("spotify_import_status", status)
+            sendMessage(status)
+        } finally {
+            importMutex.unlock()
+        }
     }
 
     //<============= HomeTab =============>
@@ -584,12 +700,23 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
 
     //<============= Tracking =============>
 
+    private enum class SkipDecision { SKIP, PAUSED, NONE }
+
+    private val autoSkipLock = Any()
+    private var lastPlayingState = false
+    private var lastSkippedTrackId: String? = null
+    private var lastSkipAt = 0L
+    private var consecutiveSkips = 0
+    private var autoSkipPausedUntil = 0L
+    private var autoSkipFailureNotified = false
+
     override suspend fun onTrackChanged(details: TrackDetails?) {
         if (details != null) {
             if (log) {
                 api.log(details.track)
             }
         }
+        maybeAutoSkip(details, null)
     }
 
     override suspend fun onPlayingStateChanged(details: TrackDetails?, isPlaying: Boolean) {
@@ -600,6 +727,70 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
                 details.currentPosition.div(1000),
                 details.totalDuration?.div(1000)?.toDouble() ?: 0.0
             )
+        }
+        maybeAutoSkip(details, isPlaying)
+    }
+
+    private suspend fun maybeAutoSkip(details: TrackDetails?, playing: Boolean?) {
+        if (playing != null) {
+            synchronized(autoSkipLock) {
+                lastPlayingState = playing
+            }
+        }
+        if (details == null) return
+        if (!skipAlternatives) return
+
+        val track = details.track
+        if (track.type != Track.Type.Song) return
+
+        val isAlternative = AlternativeVersions.isAlternative(track.title, customSkipKeywords)
+        val decision = synchronized(autoSkipLock) {
+            if (!isAlternative) {
+                consecutiveSkips = 0
+                autoSkipPausedUntil = 0L
+                return@synchronized SkipDecision.NONE
+            }
+            if (!lastPlayingState) return@synchronized SkipDecision.NONE
+
+            val now = System.currentTimeMillis()
+            if (now < autoSkipPausedUntil) return@synchronized SkipDecision.NONE
+            if (track.id == lastSkippedTrackId && now - lastSkipAt < SKIP_DUPLICATE_WINDOW_MS) {
+                return@synchronized SkipDecision.NONE
+            }
+            if (consecutiveSkips >= MAX_CONSECUTIVE_SKIPS) {
+                consecutiveSkips = 0
+                autoSkipPausedUntil = now + AUTO_SKIP_PAUSE_MS
+                return@synchronized SkipDecision.PAUSED
+            }
+
+            consecutiveSkips++
+            lastSkippedTrackId = track.id
+            lastSkipAt = now
+            SkipDecision.SKIP
+        }
+
+        when (decision) {
+            SkipDecision.SKIP -> {
+                if (!playbackSkipper.skipNext()) {
+                    val notify = synchronized(autoSkipLock) {
+                        if (autoSkipFailureNotified) {
+                            false
+                        } else {
+                            autoSkipFailureNotified = true
+                            true
+                        }
+                    }
+                    if (notify) {
+                        sendMessage("Auto-skip could not control playback on this Echo version.")
+                    }
+                }
+            }
+
+            SkipDecision.PAUSED -> sendMessage(
+                "Auto-skip paused after skipping $MAX_CONSECUTIVE_SKIPS alternative versions in a row."
+            )
+
+            SkipDecision.NONE -> Unit
         }
     }
 
@@ -618,9 +809,20 @@ class DeezerExtension : HomeFeedClient, TrackClient, LikeClient, RadioClient,
     private val shelf: String get() = session.settings?.getString("shelf") ?: DEFAULT_TYPE
     private val log: Boolean get() = session.settings?.getBoolean("log") == true
     private val history: Boolean get() = session.settings?.getBoolean("history") != false
+    private val skipAlternatives: Boolean
+        get() = session.settings?.getBoolean("skip_alternatives") == true
+    private val customSkipKeywords: List<String>
+        get() = session.settings?.getString("skip_alternatives_keywords")
+            ?.split(',', ';')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            .orEmpty()
 
     companion object {
         private val dispatcher = Dispatchers.Default
         private const val DEFAULT_TYPE = "grid"
+        private const val MAX_CONSECUTIVE_SKIPS = 5
+        private const val SKIP_DUPLICATE_WINDOW_MS = 20_000L
+        private const val AUTO_SKIP_PAUSE_MS = 120_000L
     }
 }

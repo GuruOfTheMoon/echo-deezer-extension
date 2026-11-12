@@ -52,8 +52,8 @@ class DeezerPlaylist(private val deezerApi: DeezerApi) {
         )
     }
 
-    suspend fun addToPlaylist(playlist: Playlist, tracks: List<Track>) {
-        deezerApi.callApi(
+    suspend fun addToPlaylist(playlist: Playlist, tracks: List<Track>): JsonObject {
+        return deezerApi.callApi(
             method = "playlist.addSongs",
             paramsBuilder = {
                 put("playlist_id", playlist.id)

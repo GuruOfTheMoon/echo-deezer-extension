@@ -12,6 +12,8 @@ This is a fork of [LuftVerbot/echo-deezer-extension](https://github.com/LuftVerb
 - **Multiple Login Options**: Choose from three different ways to sign in.
 - **Personal Library Access**: Access your Deezer library directly within Echo.
 - **Diverse Radio Options**: Explore various radio features, including Flow and more.
+- **Skip Alternative Versions**: Optionally skip remixes, slowed/sped-up tracks, live recordings, covers and other alternative versions automatically, with custom keywords for your own exceptions.
+- **Spotify Playlist Import**: Paste a public Spotify playlist link in the extension settings to recreate it as a Deezer playlist, with automatic track matching.
 
 ## Screenshots
 
